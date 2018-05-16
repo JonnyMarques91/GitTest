@@ -1,4 +1,5 @@
-Exemplo
+Exemplo (Atualizado 22:58 15/05/2018)
+
 …or create a new repository on the command line
 echo "# GitTest" >> README.md
 git init

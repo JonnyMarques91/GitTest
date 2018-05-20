@@ -7,7 +7,10 @@
 
 /* Máscaras do Display */
 #define ILI93XX_LCD_CS      1
-#define BACKLIGHT_TIME		30	// Segundos
+#define BACKLIGHT_TIME		30	// Segundos*10
+
+/* Máscaras do Bluetooth */
+#define BLUETOOTH_TIME		20 // Segundos*10
 
 /* Máscaras da Interrupção */
 #define TC			TC0
@@ -16,9 +19,22 @@
 #define TC_Handler  TC0_Handler
 #define TC_IRQn     TC0_IRQn
 
+/** Reference voltage for ADC,in mv. */
+#define VOLT_REF        (5000)
+/* Tracking Time*/
+#define TRACKING_TIME    15
+/* Transfer Period */
+#define TRANSFER_PERIOD  2
+/* Startup Time*/
+#define STARTUP_TIME ADC_STARTUP_TIME_4
+/** The maximal digital value */
+#define MAX_DIGITAL_AD	4095
+
+#define ADC_CHANNEL 5	//PB1 AD5
+
 /* Máscaras - Potência da Bomba (Ajustar Empiricamente) */
 /*			Duty Cycle Update (32bits)					*/
-#define MAX_DIGITAL 4095
+#define MAX_DIGITAL_DC 4095
 #define BOMBA_Off	4095	//   0%
 #define BOMBA_Low	2731	// ~25%
 #define BOMBA_Med	1365	// ~50%
@@ -27,11 +43,17 @@
 
 /* Máscaras - Nível de Umidade (Ajustar Empiricamente) */
 /*			Duty Cycle Update (32bits)				   */
-#define UMID_Null	U0	//  0% 
-#define UMID_Norm	U2	//  75%
-#define UMID_High	U3	// 100%
+#define TERRA_SECA	20	//   0% 
+#define TERRA_UMID	40	//  50%
+#define TERRA_ENX	80	//  80%
+#define TERRA_MAX	95
 
-/* Máscaras PIO */
+/* Máscaras - UART */
+#define CONF_UART              UART0
+#define CONF_UART_BAUDRATE     9600
+#define CONF_UART_CHAR_LENGTH  US_MR_CHRL_8_BIT
+#define CONF_UART_PARITY       US_MR_PAR_NO
+#define CONF_UART_STOP_BITS    US_MR_NBSTOP_1_BIT
 
 /* Protótipos de Sub-Rotinas e Funções */
 void presence_cfg();
@@ -39,11 +61,14 @@ void presence_interrupt();
 void bomba_control();
 void leitura_umidade();
 void display_update();
+void bluetooth_update();
+
 void PWM_init();
+void UART_init();
 
 /* Declaração de variáveis Globais */
-uint16_t uCNTseg, uCNTbmb, uCNTpresence, uTimePresence, uPresence_sts;
-uint32_t duty_cycle_bomb;
+uint16_t uCNTseg, uCNTbmb, uCNTpresence, uTimePresence, uTimeSendBluetooth, uPresence_sts;
+uint32_t duty_cycle_bomb, Actual_Duty_Cycle, Actual_Humidity;
 char sPresence_sts[10];
 
 struct ili93xx_opt_t g_ili93xx_display_opt;
@@ -125,12 +150,10 @@ static void tc_config(uint32_t freq_desejada)
 /* Rotina de Interrupção - TC */
 void TC_Handler(void)
 {
-
 	tc_get_status(TC,CHANNEL);
-	bomba_control();	//Chama Controle da Bomba
+	adc_start(ADC);		//Inicia conversão A/D
 	if (uPresence_sts == TRUE)
-	{
-		uTimePresence++;
+	{ 
 		LED_On(LED1_GPIO);
 		if (uTimePresence>BACKLIGHT_TIME)
 		{
@@ -139,6 +162,7 @@ void TC_Handler(void)
 			aat31xx_disable_backlight();
 			LED_Off(LED1_GPIO);
 		}
+		uTimePresence++;
 	}
 	else
 	{
@@ -148,9 +172,17 @@ void TC_Handler(void)
 		LED_Off(LED1_GPIO);
 	}
 	
+	uTimeSendBluetooth++;
+	if (uTimeSendBluetooth>BLUETOOTH_TIME)
+	{
+		uTimeSendBluetooth = 0;
+		bluetooth_update();
+	}
+			
 //	LED_Off(LED1_GPIO);
 // 	pio_set_pin_low(LED0_GPIO);
 //	LED_Toggle(LED1_GPIO);
+	bomba_control();	//Chama Controle da Bomba
 	display_update();	//Atualiza Display
 }
 
@@ -174,6 +206,18 @@ void PWM_init(void)
 	PWM->PWM_ENA = PWM_ENA_CHID0;
 }
 
+void UART_init()
+{
+	static usart_serial_options_t usart_options = {
+		.baudrate = CONF_UART_BAUDRATE,
+		.charlength = CONF_UART_CHAR_LENGTH,
+		.paritytype = CONF_UART_PARITY,
+		.stopbits = CONF_UART_STOP_BITS
+	};
+	usart_serial_init(CONF_UART, &usart_options);
+	stdio_serial_init((Usart *)CONF_UART, &usart_options);
+}
+
 /* Configuração da Interrupção - Sensor de Presença */
 void presence_cfg()
 {
@@ -184,14 +228,45 @@ void presence_cfg()
 	NVIC_EnableIRQ(PIOB_IRQn);
 }
 
+void configure_adc(void)
+{
+	/* Enable peripheral clock. */
+	pmc_enable_periph_clk(ID_ADC);
+	adc_init(ADC, sysclk_get_cpu_hz(), 6400000, STARTUP_TIME);
+	adc_configure_timing(ADC, TRACKING_TIME	, ADC_SETTLING_TIME_3, TRANSFER_PERIOD);
+	adc_configure_trigger(ADC, ADC_TRIG_SW, 0);
+	/* Enable channel for potentiometer. */
+	adc_enable_channel(ADC, ADC_CHANNEL);
+	NVIC_SetPriority(ADC_IRQn, 16);
+	/* Enable ADC interrupt. */
+	NVIC_EnableIRQ(ADC_IRQn);
+	/* Enable ADC channel interrupt. */
+	adc_enable_interrupt(ADC, ADC_IER_DRDY);
+}
+
+void ADC_Handler(void)
+{
+	if ((adc_get_status(ADC) & ADC_ISR_DRDY) == ADC_ISR_DRDY)
+	{
+		Actual_Humidity = (MAX_DIGITAL_AD - adc_get_latest_value(ADC))/10;
+		if (Actual_Humidity>100)	Actual_Humidity = 100;
+		if (Actual_Humidity<0)		Actual_Humidity = 0;
+		bomba_control();	//Chama Controle da Bomba
+	}
+	
+}
+
 int main (void)
 {
+	unsigned char key_input;
 	/* Chamada de rotinas de inicialização */
 	sysclk_init();
 	board_init();
 	configure_lcd();
+	configure_adc();
 	PWM_init();
-	
+	UART_init();
+
 	presence_cfg();
 	tc_config(1);
 	
@@ -200,12 +275,17 @@ int main (void)
 	ili93xx_draw_string(10,  20, (uint8_t *)"Duty  Cycle: ");
 	ili93xx_draw_string(10,  50, (uint8_t *)"Temperature: ");
 	ili93xx_draw_string(10,  80, (uint8_t *)"   Humidity: ");
-	ili93xx_draw_string(10, 110, (uint8_t *)"    G. Hum.:");
-	ili93xx_draw_string(10, 140, (uint8_t *)"   Presence:");
+	ili93xx_draw_string(10, 110, (uint8_t *)"    G. Hum.: ");
+	ili93xx_draw_string(10, 140, (uint8_t *)"    Counter: ");
+	ili93xx_draw_string(10, 170, (uint8_t *)"   Presence: ");
+	
+	/* Escreve SERIAL */
+// 	puts("*** Teste Dados Serial ***\n");
+// 	printf("Teste Escrever Serial: %i", 123);
 
 	while(1)
 	{
-		
+
 	}
 }
 
@@ -220,31 +300,48 @@ void presence_interrupt()
 //	LED_On(LED1_GPIO);
 //	tc_config(0.1);
 //	PIOB->PIO_PSR=(1<<3);
-
-	aat31xx_set_backlight(AAT31XX_AVG_BACKLIGHT_LEVEL);
 	uPresence_sts = TRUE;
+	aat31xx_set_backlight(AAT31XX_AVG_BACKLIGHT_LEVEL);
+	bluetooth_update();
 }
 
 void bomba_control(void)
-{	
-	if (uCNTbmb<10)	PWM->PWM_CH_NUM[0].PWM_CDTYUPD = 4095-uCNTbmb*409;
-	else uCNTbmb = 0;
- 	uCNTbmb++;	
+{
+	if (Actual_Humidity > TERRA_MAX)	PWM->PWM_CH_NUM[0].PWM_CDTYUPD = MAX_DIGITAL_DC - BOMBA_Off;
+	if ((Actual_Humidity >= TERRA_ENX) && (Actual_Humidity < TERRA_MAX))	PWM->PWM_CH_NUM[0].PWM_CDTYUPD = BOMBA_Low;
+	if (Actual_Humidity < TERRA_UMID)	PWM->PWM_CH_NUM[0].PWM_CDTYUPD = BOMBA_Med;
+	if (Actual_Humidity < TERRA_SECA)	PWM->PWM_CH_NUM[0].PWM_CDTYUPD = BOMBA_Max;
+	//Testes
+// 	if (uCNTbmb<10)	PWM->PWM_CH_NUM[0].PWM_CDTYUPD = MAX_DIGITAL_DC-uCNTbmb*409;
+// 	else uCNTbmb = 0;
+//  	uCNTbmb++;	
+}
+
+/* Envia dados via Bluetooth */
+/* Periódicamente ou quando detectada presença */
+void bluetooth_update(void)
+{
+	printf("Duty Cycle: %d%%\n", Actual_Duty_Cycle);
+	printf("Temperatura: \n");
+	printf("Umidade: \n");
+	printf("Umidade (Solo): %i%%\n", Actual_Humidity);
+	printf("Contagem: %d\n", uTimePresence);
+	if (uPresence_sts == TRUE) printf("PRESENCA DETECTADA!\n");
+	printf("\n");
 }
 
 void display_update(void)
 {
-	uint32_t Actual_Duty_Cycle;
-	
 	Actual_Duty_Cycle = (PWM->PWM_CH_NUM[0].PWM_CDTY);
-	Actual_Duty_Cycle = (Actual_Duty_Cycle * 100)/MAX_DIGITAL;
+	Actual_Duty_Cycle = (100 - (Actual_Duty_Cycle * 100)/MAX_DIGITAL_DC);
 	
-	char buffer1[10], buffer2[10], buffer3[10], buffer4[10], buffer5[10];
-	sprintf (buffer1, "%d%%", Actual_Duty_Cycle);
-// 	sprintf (buffer2, "%d%%", Actual_Duty_Cycle);
-// 	sprintf (buffer3, "%d%%", Actual_Duty_Cycle);
- 	sprintf (buffer4, "%d", uTimePresence);	//teste
-	sprintf (buffer5, "%s", sPresence_sts);
+	char buffer1[10], buffer2[10], buffer3[10], buffer4[10], buffer5[10], buffer6[10];
+	sprintf (buffer1, "%d%%", Actual_Duty_Cycle);	//DC
+// 	sprintf (buffer2, "%d%%", Actual_Duty_Cycle);	//Temperatura
+// 	sprintf (buffer3, "%d%%", Actual_Humidity);		//Umidade
+ 	sprintf (buffer4, "%d%%", Actual_Humidity);		//Umidade-Solo
+ 	sprintf (buffer5, "%d", uTimePresence);			//
+	sprintf (buffer6, "%s", sPresence_sts);			//Presença
 	
 	// Desenha retângulo
 	ili93xx_set_foreground_color(COLOR_SKYBLUE);
@@ -252,10 +349,11 @@ void display_update(void)
 	
 	// Escreve uma String no LCD na posição 140, 180
 	ili93xx_set_foreground_color(COLOR_BLACK);
-	ili93xx_draw_string(170, 20, (uint8_t*) buffer1);	//(x32, y32, string)
-// 	ili93xx_draw_string(170, 50, (uint8_t*) buffer2);	//(x32, y32, string)
-// 	ili93xx_draw_string(170, 80, (uint8_t*) buffer3);	//(x32, y32, string)
- 	ili93xx_draw_string(170, 110, (uint8_t*) buffer4);	//(x32, y32, string)
- 	if (uPresence_sts == TRUE)	ili93xx_draw_string(170, 140,"YES");	//(x32, y32, string)
- 	else						ili93xx_draw_string(170, 140,"NO ");	//(x32, y32, string)
+	ili93xx_draw_string(170, 20, (uint8_t*) buffer1);	//(x32, y32, string) DC
+ //	ili93xx_draw_string(170, 50, (uint8_t*) buffer2);	//(x32, y32, string) Temperatura
+// 	ili93xx_draw_string(170, 80, (uint8_t*) buffer3);	//(x32, y32, string) Umidade
+ 	ili93xx_draw_string(170, 110, (uint8_t*) buffer4);	//(x32, y32, string) Umidade-Solo
+ 	ili93xx_draw_string(170, 140, (uint8_t*) buffer5);	//(x32, y32, string) Tempo Display
+ 	if (uPresence_sts == TRUE)	ili93xx_draw_string(170, 170,"YES");	//(x32, y32, string)
+ 	else						ili93xx_draw_string(170, 170,"NO ");	//(x32, y32, string)
 }

@@ -17,3 +17,5 @@ You can initialize this repository with code from a Subversion, Mercurial, or TF
 * Display + Formatação
 * Timer
 * Presença + Backlight
+
+*Corrigida lógica de funcionamento da bomba;

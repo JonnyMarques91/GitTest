@@ -25,7 +25,8 @@
 #define TRANSFER_PERIOD  2
 #define STARTUP_TIME ADC_STARTUP_TIME_4
 #define MAX_DIGITAL_AD	4095		//Máximo valor digital
-#define ADC_CHANNEL 5				//PB1 AD5
+#define ADC_CHANNEL		5			//PB1  AD5
+#define ADC_CHANNEL_L	12			//PC12 AD12
 
 /* Máscaras - Potência da Bomba (Ajustado Arbitrariamente)  */
 /*			  Duty Cycle Update (32bits)					*/
@@ -65,7 +66,7 @@ void UART_init();
 
 /* Declaração de variáveis Globais */
 uint16_t uCNTsampl, uCNTseg, uCNTbmb, uCNTpresence, uTimePresence, uTimeSendBluetooth, uPresence_sts, uBomba_Status, AuxStandBy;
-uint32_t duty_cycle_bomb, Actual_Duty_Cycle, Actual_Humidity;
+uint32_t duty_cycle_bomb, Actual_Duty_Cycle, Actual_Humidity, Actual_Luminosity;
 char sPresence_sts[10];
 
 struct ili93xx_opt_t g_ili93xx_display_opt;
@@ -129,7 +130,7 @@ static void tc_config(uint32_t freq_desejada)
 	counts = (ul_sysclk/ul_div)/freq_desejada;
 	tc_write_rc(TC, CHANNEL, counts);
 	NVIC_ClearPendingIRQ(TC_IRQn);
-	NVIC_SetPriority(TC_IRQn, 5);
+	NVIC_SetPriority(TC_IRQn, 5);	//5
 	NVIC_EnableIRQ(TC_IRQn);
 	// Enable interrupts for this TC, and start the TC.
 	tc_enable_interrupt(TC,	CHANNEL, TC_IER_CPCS);
@@ -223,20 +224,38 @@ void configure_adc(void)
 	adc_configure_timing(ADC, TRACKING_TIME	, ADC_SETTLING_TIME_3, TRANSFER_PERIOD);
 	adc_configure_trigger(ADC, ADC_TRIG_SW, 0);
 	adc_enable_channel(ADC, ADC_CHANNEL);
-	NVIC_SetPriority(ADC_IRQn, 16);
+	adc_enable_channel(ADC, ADC_CHANNEL_L);	
+	NVIC_SetPriority(ADC_IRQn, 16);	//16
 	NVIC_EnableIRQ(ADC_IRQn);
-	adc_enable_interrupt(ADC, ADC_IER_DRDY);
+//	adc_enable_interrupt(ADC, ADC_IER_DRDY);
+	adc_enable_interrupt(ADC, ADC_ISR_EOC12);
+ 	adc_enable_interrupt(ADC, ADC_ISR_EOC5);
 }
 
 void ADC_Handler(void)
-{
-	if ((adc_get_status(ADC) & ADC_ISR_DRDY) == ADC_ISR_DRDY)
-	{
-		Actual_Humidity = (MAX_DIGITAL_AD - adc_get_latest_value(ADC))/10;
-		if (Actual_Humidity>100)	Actual_Humidity = 100;
-		if (Actual_Humidity<0)		Actual_Humidity = 0;
-		if (uCNTsampl>TEMPO_AMOSTRAGEM)		bomba_control();	//Chama Controle da Bomba
-	}
+{	
+//     	if ((adc_get_status(ADC) & ADC_ISR_DRDY) == ADC_ISR_DRDY)
+//     	{
+//     		Actual_Humidity = (MAX_DIGITAL_AD - adc_get_latest_value(ADC))/10;
+//     		if (Actual_Humidity>100)	Actual_Humidity = 100;
+//     		if (Actual_Humidity<0)		Actual_Humidity = 0;
+//     		if (uCNTsampl>TEMPO_AMOSTRAGEM)		bomba_control();	//Chama Controle da Bomba
+//     	}
+
+    	if (adc_get_status(ADC) & ADC_ISR_EOC5)
+    	{
+    		Actual_Humidity = (MAX_DIGITAL_AD - adc_get_channel_value(ADC, ADC_CHANNEL))/10;
+    		if (Actual_Humidity>100)			Actual_Humidity = 100;
+    		if (Actual_Humidity<0)				Actual_Humidity = 0;
+    		if (uCNTsampl>TEMPO_AMOSTRAGEM)		bomba_control();	//Chama Controle da Bomba
+    	}
+    	else if (adc_get_status(ADC) & ADC_ISR_EOC12)
+    	{
+    		/*Actual_Luminosity = (MAX_DIGITAL_AD - adc_get_channel_value(ADC, ADC_CHANNEL_L))/10;*/
+    		Actual_Luminosity = /*(MAX_DIGITAL_AD -*/adc_get_channel_value(ADC, ADC_CHANNEL_L)/*)/10*/;
+// 			if (Actual_Luminosity>100)			Actual_Luminosity = 100;
+// 			if (Actual_Luminosity<0)			Actual_Luminosity = 0;
+    	}
 }
 
 int main (void)
@@ -254,13 +273,14 @@ int main (void)
 	
 	/* Draw text on the LCD */
 	ili93xx_set_foreground_color(COLOR_BLACK);
-	ili93xx_draw_string(10,  20, (uint8_t *)"Duty  Cycle: ");
-	ili93xx_draw_string(10,  50, (uint8_t *)"Temperature: ");
-	ili93xx_draw_string(10,  80, (uint8_t *)"   Humidity: ");
-	ili93xx_draw_string(10, 110, (uint8_t *)"    G. Hum.: ");
-	ili93xx_draw_string(10, 140, (uint8_t *)"   Stand-By: ");
-	ili93xx_draw_string(10, 170, (uint8_t *)" Sts. Bomba: ");
-	ili93xx_draw_string(10, 200, (uint8_t *)"   Presence: ");
+	ili93xx_draw_string(10,  20, (uint8_t *)" Duty  Cycle: ");
+	ili93xx_draw_string(10,  50, (uint8_t *)" Temperature: ");
+	ili93xx_draw_string(10,  80, (uint8_t *)"    Humidity: ");
+	ili93xx_draw_string(10, 110, (uint8_t *)"     G. Hum.: ");
+	ili93xx_draw_string(10, 140, (uint8_t *)"    Stand-By: ");
+	ili93xx_draw_string(10, 170, (uint8_t *)"Luminosidade: ");
+	ili93xx_draw_string(10, 200, (uint8_t *)"  Sts. Bomba: ");
+	ili93xx_draw_string(10, 230, (uint8_t *)"    Presence: ");
 
 	while(1)
 	{
@@ -306,6 +326,7 @@ void bluetooth_update(void)
 	printf("Umidade: \n");
 	printf("Umidade (Solo): %i%%\n", Actual_Humidity);
 	printf("Stand-By: %ds\n", AuxStandBy);
+	printf("Luminosidade: %ds\n", Actual_Luminosity);
 	if (uBomba_Status == TRUE) printf("BOMBA LIGADA!\n");
 	if (uPresence_sts == TRUE) printf("PRESENCA DETECTADA!\n");
 	printf("\n");
@@ -323,8 +344,10 @@ void display_update(void)
 // 	sprintf (buffer2, "%d%%", Actual_Duty_Cycle);	//Temperatura
 // 	sprintf (buffer3, "%d%%", Actual_Humidity);		//Umidade
  	sprintf (buffer4, "%d%%", Actual_Humidity);		//Umidade-Solo
- 	sprintf (buffer5, "%ds", AuxStandBy);			//Stand-By até próxima ação
-	
+	sprintf (buffer5, "%ds", AuxStandBy);			//Stand-By até próxima ação
+	sprintf (buffer6, "%d", Actual_Luminosity);		//Luminosidade
+ 	
+		
 	// Desenha retângulo
 	ili93xx_set_foreground_color(COLOR_SKYBLUE);
 	ili93xx_draw_filled_rectangle(160, 0, 240, 320);
@@ -335,9 +358,10 @@ void display_update(void)
  //	ili93xx_draw_string(170, 50, (uint8_t*) buffer2);	//(x32, y32, string) Temperatura
 // 	ili93xx_draw_string(170, 80, (uint8_t*) buffer3);	//(x32, y32, string) Umidade
  	ili93xx_draw_string(170, 110, (uint8_t*) buffer4);	//(x32, y32, string) Umidade-Solo
- 	ili93xx_draw_string(170, 140, (uint8_t*) buffer5);	//(x32, y32, string) Tempo Display
-	if (uBomba_Status == TRUE)	ili93xx_draw_string(170, 170,"ON");
-	else						ili93xx_draw_string(170, 170,"OFF");
- 	if (uPresence_sts == TRUE)	ili93xx_draw_string(170, 200,"YES");	//(x32, y32, string)
- 	else						ili93xx_draw_string(170, 200,"NO ");	//(x32, y32, string)
+ 	ili93xx_draw_string(170, 140, (uint8_t*) buffer5);	//(x32, y32, string) Luminosidade
+	ili93xx_draw_string(170, 170, (uint8_t*) buffer6);	//(x32, y32, string) Tempo Display 
+	if (uBomba_Status == TRUE)	ili93xx_draw_string(170, 200,"ON");
+	else						ili93xx_draw_string(170, 200,"OFF");
+ 	if (uPresence_sts == TRUE)	ili93xx_draw_string(170, 230,"YES");	//(x32, y32, string)
+ 	else						ili93xx_draw_string(170, 230,"NO ");	//(x32, y32, string)
 }

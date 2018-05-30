@@ -4,6 +4,7 @@
 /* Booleanas */
 #define	TRUE	1
 #define FALSE	0
+#define LED_ILUM (1<<14)
 
 /* Máscaras do Display */
 #define ILI93XX_LCD_CS      1
@@ -27,6 +28,7 @@
 #define MAX_DIGITAL_AD	4095		//Máximo valor digital
 #define ADC_CHANNEL		5			//PB1  AD5
 #define ADC_CHANNEL_L	12			//PC12 AD12
+#define TSON			(1<<4)		//Temperature Sensor On
 
 /* Máscaras - Potência da Bomba (Ajustado Arbitrariamente)  */
 /*			  Duty Cycle Update (32bits)					*/
@@ -54,6 +56,9 @@
 /* Máscaras - Temporização */
 #define  TEMPO_AMOSTRAGEM		10	// 1 Hora [Segundos]
 
+/* Nível Luminosidade */
+#define LUM_MIN		1800			// Luminosidade mínima
+
 /* Protótipos */
 void presence_cfg();
 void presence_interrupt();
@@ -66,7 +71,9 @@ void UART_init();
 
 /* Declaração de variáveis Globais */
 uint16_t uCNTsampl, uCNTseg, uCNTbmb, uCNTpresence, uTimePresence, uTimeSendBluetooth, uPresence_sts, uBomba_Status, AuxStandBy;
-uint32_t duty_cycle_bomb, Actual_Duty_Cycle, Actual_Humidity, Actual_Luminosity;
+uint32_t duty_cycle_bomb, Actual_Duty_Cycle, Actual_Humidity, Actual_Luminosity, Actual_Temperature;
+//float Actual_Temperature;
+
 char sPresence_sts[10];
 
 struct ili93xx_opt_t g_ili93xx_display_opt;
@@ -147,6 +154,8 @@ void TC_Handler(void)
 	adc_start(ADC);		//Inicia conversão A/D	
 	if (uPresence_sts == TRUE)
 	{ 
+		if (Actual_Luminosity < LUM_MIN) PIOB->PIO_SODR |= LED_ILUM;
+		else	PIOB->PIO_CODR |= LED_ILUM;
 		LED_On(LED1_GPIO);
 		if (uTimePresence>BACKLIGHT_TIME)
 		{
@@ -162,6 +171,7 @@ void TC_Handler(void)
 		uPresence_sts = 0;
 		uTimePresence = 0;
 		aat31xx_disable_backlight();
+		PIOB->PIO_CODR |= LED_ILUM; 
 		LED_Off(LED1_GPIO);
 	}
 	uTimeSendBluetooth++;
@@ -224,12 +234,15 @@ void configure_adc(void)
 	adc_configure_timing(ADC, TRACKING_TIME	, ADC_SETTLING_TIME_3, TRANSFER_PERIOD);
 	adc_configure_trigger(ADC, ADC_TRIG_SW, 0);
 	adc_enable_channel(ADC, ADC_CHANNEL);
-	adc_enable_channel(ADC, ADC_CHANNEL_L);	
+	adc_enable_channel(ADC, ADC_CHANNEL_L);
+	ADC->ADC_ACR = TSON;	//Habilita Sensor Interno de Temperatura
+	adc_enable_channel(ADC, ADC_TEMPERATURE_SENSOR);	
 	NVIC_SetPriority(ADC_IRQn, 16);	//16
 	NVIC_EnableIRQ(ADC_IRQn);
 //	adc_enable_interrupt(ADC, ADC_IER_DRDY);
 	adc_enable_interrupt(ADC, ADC_ISR_EOC12);
  	adc_enable_interrupt(ADC, ADC_ISR_EOC5);
+	adc_enable_interrupt(ADC, ADC_ISR_EOC15);
 }
 
 void ADC_Handler(void)
@@ -249,13 +262,15 @@ void ADC_Handler(void)
     		if (Actual_Humidity<0)				Actual_Humidity = 0;
     		if (uCNTsampl>TEMPO_AMOSTRAGEM)		bomba_control();	//Chama Controle da Bomba
     	}
-    	else if (adc_get_status(ADC) & ADC_ISR_EOC12)
-    	{
-    		/*Actual_Luminosity = (MAX_DIGITAL_AD - adc_get_channel_value(ADC, ADC_CHANNEL_L))/10;*/
-    		Actual_Luminosity = /*(MAX_DIGITAL_AD -*/adc_get_channel_value(ADC, ADC_CHANNEL_L)/*)/10*/;
-// 			if (Actual_Luminosity>100)			Actual_Luminosity = 100;
-// 			if (Actual_Luminosity<0)			Actual_Luminosity = 0;
-    	}
+    	else if (adc_get_status(ADC) & ADC_ISR_EOC12)	Actual_Luminosity = adc_get_channel_value(ADC, ADC_CHANNEL_L);
+		else if (adc_get_status(ADC) & ADC_ISR_EOC15)	Actual_Temperature = adc_get_channel_value(ADC, ADC_TEMPERATURE_SENSOR)/*/100*/;
+}
+
+void pio_init(void)
+{
+	PIOB->PIO_PER |= LED_ILUM;
+	PIOB->PIO_OER |= LED_ILUM;
+	PIOB->PIO_SODR |= LED_ILUM;
 }
 
 int main (void)
@@ -264,6 +279,7 @@ int main (void)
 	/* Chamada de rotinas de inicialização */
 	sysclk_init();
 	board_init();
+	pio_init();
 	configure_lcd();
 	configure_adc();
 	PWM_init();
@@ -322,11 +338,11 @@ void bomba_control(void)
 void bluetooth_update(void)
 {
 	printf("Duty Cycle: %d%%\n", Actual_Duty_Cycle);
-	printf("Temperatura: \n");
+	printf("Temperatura: %d\n", Actual_Temperature);
 	printf("Umidade: \n");
 	printf("Umidade (Solo): %i%%\n", Actual_Humidity);
 	printf("Stand-By: %ds\n", AuxStandBy);
-	printf("Luminosidade: %ds\n", Actual_Luminosity);
+	printf("Luminosidade: %d\n", Actual_Luminosity);
 	if (uBomba_Status == TRUE) printf("BOMBA LIGADA!\n");
 	if (uPresence_sts == TRUE) printf("PRESENCA DETECTADA!\n");
 	printf("\n");
@@ -341,7 +357,8 @@ void display_update(void)
 		
 	char buffer1[10], buffer2[10], buffer3[10], buffer4[10], buffer5[10], buffer6[10];
 	sprintf (buffer1, "%d%%", Actual_Duty_Cycle);	//DC
-// 	sprintf (buffer2, "%d%%", Actual_Duty_Cycle);	//Temperatura
+// 	sprintf (buffer2, "%2.2f *C", Actual_Temperature);	//Temperatura
+	sprintf (buffer2, "%d", Actual_Temperature);	//Temperatura
 // 	sprintf (buffer3, "%d%%", Actual_Humidity);		//Umidade
  	sprintf (buffer4, "%d%%", Actual_Humidity);		//Umidade-Solo
 	sprintf (buffer5, "%ds", AuxStandBy);			//Stand-By até próxima ação
@@ -350,18 +367,18 @@ void display_update(void)
 		
 	// Desenha retângulo
 	ili93xx_set_foreground_color(COLOR_SKYBLUE);
-	ili93xx_draw_filled_rectangle(160, 0, 240, 320);
+	ili93xx_draw_filled_rectangle(170, 0, 240, 320);
 	
 	// Escreve uma String no LCD na posição 140, 180
 	ili93xx_set_foreground_color(COLOR_BLACK);
-	ili93xx_draw_string(170, 20, (uint8_t*) buffer1);	//(x32, y32, string) DC
- //	ili93xx_draw_string(170, 50, (uint8_t*) buffer2);	//(x32, y32, string) Temperatura
-// 	ili93xx_draw_string(170, 80, (uint8_t*) buffer3);	//(x32, y32, string) Umidade
- 	ili93xx_draw_string(170, 110, (uint8_t*) buffer4);	//(x32, y32, string) Umidade-Solo
- 	ili93xx_draw_string(170, 140, (uint8_t*) buffer5);	//(x32, y32, string) Luminosidade
-	ili93xx_draw_string(170, 170, (uint8_t*) buffer6);	//(x32, y32, string) Tempo Display 
-	if (uBomba_Status == TRUE)	ili93xx_draw_string(170, 200,"ON");
-	else						ili93xx_draw_string(170, 200,"OFF");
- 	if (uPresence_sts == TRUE)	ili93xx_draw_string(170, 230,"YES");	//(x32, y32, string)
- 	else						ili93xx_draw_string(170, 230,"NO ");	//(x32, y32, string)
+	ili93xx_draw_string(180, 20, (uint8_t*) buffer1);	//(x32, y32, string) DC
+	ili93xx_draw_string(180, 50, (uint8_t*) buffer2);	//(x32, y32, string) Temperatura
+// 	ili93xx_draw_string(180, 80, (uint8_t*) buffer3);	//(x32, y32, string) Umidade
+ 	ili93xx_draw_string(180, 110, (uint8_t*) buffer4);	//(x32, y32, string) Umidade-Solo
+ 	ili93xx_draw_string(180, 140, (uint8_t*) buffer5);	//(x32, y32, string) Luminosidade
+	ili93xx_draw_string(180, 170, (uint8_t*) buffer6);	//(x32, y32, string) Tempo Display 
+	if (uBomba_Status == TRUE)	ili93xx_draw_string(180, 200,"ON");
+	else						ili93xx_draw_string(180, 200,"OFF");
+ 	if (uPresence_sts == TRUE)	ili93xx_draw_string(180, 230,"YES");	//(x32, y32, string)
+ 	else						ili93xx_draw_string(180, 230,"NO ");	//(x32, y32, string)
 }

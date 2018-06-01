@@ -33,14 +33,12 @@
 #define ADC_CHANNEL_L	6			//PB2 AD6
 #define N_AMOSTRAS_T	10			//Nº de Amostras - Temperatura
 
-/* Máscaras - Potência da Bomba (Ajustado Arbitrariamente)  */ //limpar
-/*			  Duty Cycle Update (32bits)					*/
+/* Máscaras - Potência da Bomba (Ajustado Arbitrariamente)  */
 #define MAX_DIGITAL_DC	4095
 #define BOMBA_Off		0			//   0%
 #define BOMBA_Low		1365		// ~25%
 #define BOMBA_Med		3800		// ~50%
 #define BOMBA_Max		4095		// 100%
-#define DUTY_p25		BOMBA_Low
 
 /* Máscaras - Nível de Umidade (Ajustado Arbitrariamente)   */ //limpar
 /*			  Duty Cycle Update (32bits)				    */
@@ -57,7 +55,7 @@
 #define CONF_UART_STOP_BITS		US_MR_NBSTOP_1_BIT
 
 /* Máscaras - Temporização */
-#define  TEMPO_AMOSTRAGEM		10	// 1 Hora [Segundos]
+#define  TEMPO_AMOSTRAGEM		10	// 1 Hora = 3600 Segundos
 
 /* Nível Luminosidade */
 #define LUM_MIN		60				// Luminosidade mínima %
@@ -73,13 +71,14 @@ void PWM_init();
 void UART_init();
 
 /* Declaração de variáveis Globais */
-uint8_t uCNTseg, uCNTbmb, uBomba_Status, AuxStandBy;
+uint32_t uCNTbmb, AuxStandBy;
 
-unsigned char uCNTsampl, uCNTtemp, uCNTpresence, uTimeSendBluetooth, uTimePresence, uPresence_sts, Actual_Humidity, Actual_Luminosity, Actual_Duty_Cycle;
-float Actual_Temperature, f_temp = 0.0;
+unsigned char uCNTsampl, uCNTtemp, uCNTpresence, uTimeSendBluetooth, uTimePresence, uBomba_Status, uPresence_sts, Actual_Humidity, Actual_Luminosity, Actual_Duty_Cycle;
+float Actual_Temperature = 0.0, f_temp = 0.0;
 
 struct ili93xx_opt_t g_ili93xx_display_opt;
 
+/* Inicialização - LCD */
 void configure_lcd()
 {
 	/** Enable peripheral clock */
@@ -102,29 +101,29 @@ void configure_lcd()
 	smc_set_mode(SMC, ILI93XX_LCD_CS, SMC_MODE_READ_MODE
 	| SMC_MODE_WRITE_MODE);
 
-	/** Initialize display parameter */
+	/* Inicializa parâmetros do LCD */
 	g_ili93xx_display_opt.ul_width = ILI93XX_LCD_WIDTH;
 	g_ili93xx_display_opt.ul_height = ILI93XX_LCD_HEIGHT;
 	g_ili93xx_display_opt.foreground_color = COLOR_BLACK;
 	g_ili93xx_display_opt.background_color = COLOR_WHITE;
 
-	/** Switch off backlight */
+	/* Desliga Backlight */
 	aat31xx_disable_backlight();
 
-	/** Initialize LCD */
+	/* Inicializa LCD */
 	ili93xx_init(&g_ili93xx_display_opt);
 
-	/** Set backlight level */
+	/*Nível do Backlight */
 	aat31xx_set_backlight(AAT31XX_AVG_BACKLIGHT_LEVEL);
 
 	ili93xx_set_foreground_color(COLOR_WHITE);
 	ili93xx_draw_filled_rectangle(0, 0, ILI93XX_LCD_WIDTH,
 	ILI93XX_LCD_HEIGHT);
-	/** Turn on LCD */
+	/* Liga LCD */
 	ili93xx_display_on();
 	ili93xx_set_cursor_position(0, 0);
 	
-	/* Draw text on the LCD */
+	/* Escreve textos - LCD */
 	ili93xx_set_foreground_color(COLOR_BLACK);
 	ili93xx_draw_string(10,  20, (uint8_t *)" Duty  Cycle: ");
 	ili93xx_draw_string(10,  50, (uint8_t *)" Temperature: ");
@@ -135,7 +134,7 @@ void configure_lcd()
 	ili93xx_draw_string(10, 200, (uint8_t *)"    Presence: ");
 }
 
-/* Configure Timer Counter 0 to generate an interrupt every ... */
+/* Configuração - Timer Counter 0 */
 static void tc_config(uint32_t freq_desejada)
 {
 	uint32_t ul_div;
@@ -149,23 +148,21 @@ static void tc_config(uint32_t freq_desejada)
 	counts = (ul_sysclk/ul_div)/freq_desejada;
 	tc_write_rc(TC, CHANNEL, counts);
 	NVIC_ClearPendingIRQ(TC_IRQn);
-	NVIC_SetPriority(TC_IRQn, 5);	//5
+	NVIC_SetPriority(TC_IRQn, 5);
 	NVIC_EnableIRQ(TC_IRQn);
-	// Enable interrupts for this TC, and start the TC.
 	tc_enable_interrupt(TC,	CHANNEL, TC_IER_CPCS);
 	tc_start(TC, CHANNEL);
 }
 
-/* Rotina de Interrupção - TC */
+/* Interrupção - TC */
 void TC_Handler(void)
 {
 	uCNTbmb++;
 	uTimeSendBluetooth++;
 	
-	if ((TEMPO_AMOSTRAGEM-uCNTbmb) > 0)	AuxStandBy = (TEMPO_AMOSTRAGEM-uCNTbmb);
-	else	AuxStandBy = 0;
+	
 	tc_get_status(TC,CHANNEL);
-	adc_start(ADC);		//Inicia conversão A/D	
+	adc_start(ADC);	
 	if (uPresence_sts == TRUE)
 	{ 
 		if (Actual_Luminosity < LUM_MIN) PIOB->PIO_SODR |= LED_ILUM;
@@ -193,11 +190,17 @@ void TC_Handler(void)
 		uTimeSendBluetooth = 0;
 		bluetooth_update();
 	}
-	if ((uCNTbmb>TEMPO_AMOSTRAGEM)||(Actual_Humidity >= TERRA_MAX))	bomba_control();
-	display_update();	//Atualiza Display
+	if ((uCNTbmb>TEMPO_AMOSTRAGEM)||(Actual_Humidity >= TERRA_MAX))
+	{
+		uCNTbmb = 0;
+		bomba_control();
+	}
+	if ((TEMPO_AMOSTRAGEM-uCNTbmb) > 0)	AuxStandBy = (TEMPO_AMOSTRAGEM-uCNTbmb);
+	else	AuxStandBy = 0;
+	display_update();
 }
 
-/* Rotina de inicialização do PWM */
+/* Inicialização - PWM */
 void PWM_init(void)
 {
 	// disable the PIO (peripheral controls the pin)
@@ -217,7 +220,7 @@ void PWM_init(void)
 	PWM->PWM_ENA = PWM_ENA_CHID0;
 }
 
-/* Rotina de inicialização do UART */
+/* Inicialização - UART */
 void UART_init()
 {
 	static usart_serial_options_t usart_options = {
@@ -240,6 +243,7 @@ void presence_cfg()
 	NVIC_EnableIRQ(PIOB_IRQn);
 }
 
+/* Configuração das Interrupções - ADC */
 void configure_adc(void)
 {
 	pmc_enable_periph_clk(ID_ADC);
@@ -257,6 +261,7 @@ void configure_adc(void)
 	adc_enable_interrupt(ADC, ADC_ISR_EOC15);	//Habilita interrupção (Temperatura)
 }
 
+/* Interrupção - A/D */
 void ADC_Handler(void)
 {	
 	float aux_temp;
@@ -287,6 +292,7 @@ void ADC_Handler(void)
 	}
 }
 
+/* Inicialização - PIO */
 void pio_init(void)
 {
 	PIOB->PIO_PER |= LED_ILUM;
@@ -296,7 +302,6 @@ void pio_init(void)
 
 int main (void)
 {
-	unsigned char key_input;
 	/* Chamada de rotinas de inicialização */
 	sysclk_init();
 	board_init();
@@ -309,27 +314,32 @@ int main (void)
 	tc_config(1);
 	
 	/* INIT - Variáveis globais */
+	Actual_Duty_Cycle = 0;
+	uBomba_Status = FALSE;
+	uPresence_sts = FALSE;
 	
 	while(1)
 	{
-
+	
 	}
 }
 
-void presence_interrupt()
+/* Presença detectada */
+void presence_interrupt(void)
 {
 	uPresence_sts = TRUE;
 	aat31xx_set_backlight(AAT31XX_AVG_BACKLIGHT_LEVEL);
 	bluetooth_update();
 }
 
+/* Controle da bomba de água */
 void bomba_control(void)
 {
 	if (Actual_Humidity < TERRA_SECA)	PWM->PWM_CH_NUM[0].PWM_CDTYUPD = BOMBA_Max;
 	else if ((Actual_Humidity >= TERRA_SECA) && (Actual_Humidity<TERRA_UMID))	PWM->PWM_CH_NUM[0].PWM_CDTYUPD = BOMBA_Med;
 	else	PWM->PWM_CH_NUM[0].PWM_CDTYUPD = BOMBA_Off;
-	uCNTbmb = 0;
-	display_update();	//Atualiza Display	
+//	uCNTbmb = 0;
+	display_update();	
 }
 
 /* Envia dados via Bluetooth */
@@ -337,7 +347,7 @@ void bomba_control(void)
 void bluetooth_update(void)
 {
 	printf("Duty Cycle: %d%%\n", Actual_Duty_Cycle);
-	printf("Temperatura: %2.1f\n", Actual_Temperature);
+	printf("Temperatura: %d graus Celsius\n", (uint32_t)Actual_Temperature);
 	printf("Umidade (Solo): %i%%\n", Actual_Humidity);
 	printf("Stand-By: %ds\n", AuxStandBy);
 	printf("Luminosidade: %d%%\n", Actual_Luminosity);
@@ -346,6 +356,7 @@ void bluetooth_update(void)
 	printf("\n");
 }
 
+/* Display - Atualização de dados */
 void display_update(void)
 {	
 	Actual_Duty_Cycle = ((PWM->PWM_CH_NUM[0].PWM_CDTY)*100)/MAX_DIGITAL_DC;
